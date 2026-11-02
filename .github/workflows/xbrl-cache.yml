@@ -18,7 +18,7 @@ concurrency:
 
 env:
   # 비공개 저장소의 이미지 빌드 워크플로가 게시한 digest로 고정한다(첫 게시 전에는 자리표시자라 멈춘다)
-  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:a277a3ced898bd1f3c2d6ecd4dbb140c6ac44a9fa188ed1a677b41d1261871e4
+  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:bd8c305cd07ff9865509fd15406f4250ae788b5758527534815594ccbd6e633c
   PLAN: xbrl-cache/plan.stub.json
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
           import json, os, re, sys
           d = json.load(open(os.environ['PLAN'], encoding='utf-8'))
           ok = (isinstance(d, dict) and set(d) == {'id', 'shards', 'sha256'}
-                and isinstance(d['id'], str) and re.fullmatch(r'(xbrl|pres|calc)-[0-9a-f]{12}', d['id'])
+                and isinstance(d['id'], str) and re.fullmatch(r'(xbrl|pres|calc|dart)-[0-9a-f]{12}', d['id'])
                 and type(d['shards']) is int and 1 <= d['shards'] <= 256
                 and isinstance(d['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', d['sha256']))
           if not ok:
