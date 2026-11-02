@@ -1,0 +1,125 @@
+name: xbrl-cache
+
+# 공개 DART XBRL ZIP을 파싱해 접수별 캐시를 만든다. 계획은 xbrl-cache/<이름> 브랜치의
+# xbrl-cache/plan.stub.json(계획 표: id·조각 수·sha256)이다. 작업 목록이 든 계획 원본은 비공개 R2에 있고,
+# 작업기가 받아 sha256을 확인한다. 조각마다 러너 하나가 비공개 이미지로 ZIP을 받아 파싱하고 결과를 R2에 올린다.
+# 코드는 이 저장소에 없고 이미지로만 받는다. 공개 로그에는 개수만 남긴다: 작업기 출력은 허용한 키만 통과시킨다.
+on:
+  push:
+    branches: ['xbrl-cache/*']
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: xbrl-cache-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # 비공개 저장소의 이미지 빌드 워크플로가 게시한 digest로 고정한다(첫 게시 전에는 자리표시자라 멈춘다)
+  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:a49c72022b33dd24d3bf83e25a4ed88c4129042d2be05735b233400882adac11
+  PLAN: xbrl-cache/plan.stub.json
+
+jobs:
+  shards:
+    name: Read plan
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: xbrl-cache
+      # 계획 표를 검사한 뒤 매트릭스를 만든다: 키는 id·shards·sha256뿐, 조각 수는 1..256 정수.
+      # 매트릭스 값은 계획의 값을 옮기지 않고 0..n-1로 새로 만든다(정수·범위·중복 없음)
+      - id: plan
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, re, sys
+          d = json.load(open(os.environ['PLAN'], encoding='utf-8'))
+          ok = (isinstance(d, dict) and set(d) == {'id', 'shards', 'sha256'}
+                and isinstance(d['id'], str) and re.fullmatch(r'(xbrl|pres)-[0-9a-f]{12}', d['id'])
+                and type(d['shards']) is int and 1 <= d['shards'] <= 256
+                and isinstance(d['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', d['sha256']))
+          if not ok:
+              print('::error::plan stub must be {id, shards: 1..256, sha256}', file=sys.stderr)
+              sys.exit(1)
+          if re.fullmatch(r'.*@sha256:0{64}', os.environ['IMAGE']):
+              print('::error::image digest is a placeholder', file=sys.stderr)
+              sys.exit(1)
+          print('shards=' + json.dumps(list(range(d['shards']))))
+          PY
+
+  parse:
+    name: Shard ${{ matrix.shard }}
+    needs: shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.shards.outputs.shards) }}
+    env:
+      SHARD: ${{ matrix.shard }}  # 셸에는 환경변수로만 넘기고 따옴표로 쓴다
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: xbrl-cache
+      # 이미지 받기: 읽기 전용 토큰 시크릿이 있으면 그것으로, 없으면 GITHUB_TOKEN(패키지 설정에서 이 저장소에 읽기를 준 경우)
+      - name: Pull image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          if [ -n "$GHCR_READ_TOKEN" ]; then
+            printf '%s' "$GHCR_READ_TOKEN" | docker login ghcr.io -u fvoci --password-stdin >/dev/null
+          else
+            printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          fi
+          docker pull -q "$IMAGE" >/dev/null
+          docker logout ghcr.io >/dev/null
+          [[ "$SHARD" =~ ^[0-9]{1,3}$ ]] || { echo "::error::shard must be an integer"; exit 1; }
+          mkdir -p work
+          # 출력 거르개: JSON 줄은 허용한 키만, 예외는 클래스 이름만, 그 밖의 줄은 개수만 남긴다
+          cat > "$RUNNER_TEMP/filter.py" <<'PY'
+          import json, re, sys
+          KEEP = {'plan', 'shard', 'queued', 'prior', 'done', 'failed', 'workers', 'seconds', 'parse_seconds', 'peak_mb'}
+          hidden = 0
+          for line in sys.stdin:
+              try:
+                  doc = json.loads(line)
+              except ValueError:
+                  doc = None
+              if isinstance(doc, dict):
+                  print(json.dumps({k: v for k, v in doc.items() if k in KEEP}), flush=True)
+                  continue
+              m = re.match(r'^([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b', line)
+              if m:
+                  print(f'::error::{m.group(1)}', flush=True)
+              else:
+                  hidden += 1
+          if hidden:
+              print(f'({hidden} lines of other output hidden)', flush=True)
+          PY
+      # 작업기 실행: 작업 폴더 work/를 /work로, 계획 표를 /plan.json으로. 환경변수는 이름만 넘긴다(값은 명령줄에 없다)
+      - name: Parse this shard
+        env:
+          AWS_ENDPOINT_URL: ${{ secrets.AWS_ENDPOINT_URL }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_CACHE_BUCKET: ${{ secrets.R2_CACHE_BUCKET }}
+          R2_READ_ACCESS_KEY_ID: ${{ secrets.R2_READ_ACCESS_KEY_ID }}
+          R2_READ_SECRET_ACCESS_KEY: ${{ secrets.R2_READ_SECRET_ACCESS_KEY }}
+          R2_CACHE_ACCESS_KEY_ID: ${{ secrets.R2_CACHE_ACCESS_KEY_ID }}
+          R2_CACHE_SECRET_ACCESS_KEY: ${{ secrets.R2_CACHE_SECRET_ACCESS_KEY }}
+        run: |
+          set -o pipefail
+          docker run --rm --init --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE/work:/work" -v "$GITHUB_WORKSPACE/$PLAN:/plan.json:ro" \
+            -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e AWS_ENDPOINT_URL -e R2_BUCKET -e R2_CACHE_BUCKET \
+            -e R2_READ_ACCESS_KEY_ID -e R2_READ_SECRET_ACCESS_KEY -e R2_CACHE_ACCESS_KEY_ID -e R2_CACHE_SECRET_ACCESS_KEY \
+            "$IMAGE" ar_pipelines.xbrl_ci worker --plan /plan.json --shard "$SHARD" 2>&1 \
+            | python3 -u "$RUNNER_TEMP/filter.py"
