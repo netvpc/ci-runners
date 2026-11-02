@@ -18,7 +18,7 @@ concurrency:
 
 env:
   # 비공개 저장소의 이미지 빌드 워크플로가 게시한 digest로 고정한다(첫 게시 전에는 자리표시자라 멈춘다)
-  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:bd8c305cd07ff9865509fd15406f4250ae788b5758527534815594ccbd6e633c
+  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:93e940d4f43a89fb92d073941bdc61624d9d50d260caccbde52cb30612305b7e
   PLAN: xbrl-cache/plan.stub.json
 
 jobs:
