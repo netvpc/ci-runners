@@ -40,7 +40,7 @@ jobs:
           import json, os, re, sys
           d = json.load(open(os.environ['PLAN'], encoding='utf-8'))
           ok = (isinstance(d, dict) and set(d) == {'id', 'shards', 'sha256'}
-                and isinstance(d['id'], str) and re.fullmatch(r'(xbrl|pres)-[0-9a-f]{12}', d['id'])
+                and isinstance(d['id'], str) and re.fullmatch(r'(xbrl|pres|calc)-[0-9a-f]{12}', d['id'])
                 and type(d['shards']) is int and 1 <= d['shards'] <= 256
                 and isinstance(d['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', d['sha256']))
           if not ok:
