@@ -18,7 +18,7 @@ concurrency:
 
 env:
   # 비공개 저장소의 이미지 빌드 워크플로가 게시한 digest로 고정한다(첫 게시 전에는 자리표시자라 멈춘다)
-  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:a5eb5774c4675cdfa75ba33d24170df0565970ddb30f2e0dff5222058b45da45
+  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:90d8efc17de855952d7cd7291eaebcb72b64355624d18fee1360a1296f5f57f3
   PLAN: xbrl-cache/plan.stub.json
 
 jobs:
@@ -87,7 +87,7 @@ jobs:
           # 출력 거르개: JSON 줄은 허용한 키만, 예외는 클래스 이름만, 그 밖의 줄은 개수만 남긴다
           cat > "$RUNNER_TEMP/filter.py" <<'PY'
           import json, re, sys
-          KEEP = {'plan', 'shard', 'queued', 'prior', 'done', 'failed', 'workers', 'seconds', 'parse_seconds', 'peak_mb'}
+          KEEP = {'plan', 'shard', 'queued', 'prior', 'done', 'failed', 'workers', 'seconds', 'parse_seconds', 'peak_mb', 'failed_status'}
           hidden = 0
           for line in sys.stdin:
               try:
