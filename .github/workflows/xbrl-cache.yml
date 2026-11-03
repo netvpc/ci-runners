@@ -18,7 +18,7 @@ concurrency:
 
 env:
   # 비공개 저장소의 이미지 빌드 워크플로가 게시한 digest로 고정한다(첫 게시 전에는 자리표시자라 멈춘다)
-  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:90d8efc17de855952d7cd7291eaebcb72b64355624d18fee1360a1296f5f57f3
+  IMAGE: ghcr.io/fvoci/pipelines-cpu@sha256:b9dd400e6fd68378031d425087fb76bc9841ba0dc3d1d58e70d98ef23f83c8b1
   PLAN: xbrl-cache/plan.stub.json
 
 jobs:
@@ -123,3 +123,4 @@ jobs:
             -e R2_READ_ACCESS_KEY_ID -e R2_READ_SECRET_ACCESS_KEY -e R2_CACHE_ACCESS_KEY_ID -e R2_CACHE_SECRET_ACCESS_KEY \
             "$IMAGE" ar_pipelines.xbrl_ci worker --plan /plan.json --shard "$SHARD" 2>&1 \
             | python3 -u "$RUNNER_TEMP/filter.py"
+
