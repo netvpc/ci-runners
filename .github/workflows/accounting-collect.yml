@@ -1,0 +1,159 @@
+# Runs shards of a collection plan (docs/design/0004-collection.md of fvoci/accounting-data).
+# The source of this file is runners/accounting-collect.yml in that repository; edit it there.
+#
+# The repository is public, so this workflow prints counts only, takes every input through
+# the environment (never interpolated into a script), and uses GitHub-owned actions only.
+# The same file is installed in every runner repository. Where the repository's ACCT_R2_* key
+# cannot write the raw bucket (compute runners), ACCT_COLLECT_R2_* holds one that can.
+name: accounting-collect
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_id:
+        description: Plan id (control/plans/<plan_id>/ in the raw bucket)
+        required: true
+        type: string
+      plan_sha256:
+        description: SHA-256 of plan.json
+        required: true
+        type: string
+      shard_first:
+        description: First shard to run
+        required: true
+        type: string
+        default: "0"
+      shard_last:
+        description: Last shard to run (inclusive; at most 256 shards per run)
+        required: true
+        type: string
+      collector:
+        description: Collector build (control/collector/<this>/ in the raw bucket)
+        required: true
+        type: string
+      wheel_name:
+        description: File name of the collector wheel
+        required: true
+        type: string
+      wheel_sha256:
+        description: SHA-256 of the wheel
+        required: true
+        type: string
+      requirements_sha256:
+        description: SHA-256 of requirements.txt
+        required: true
+        type: string
+      max_parallel:
+        description: Shards running at the same time
+        required: true
+        type: string
+        default: "4"
+      time_limit_minutes:
+        description: A shard stops after this long and is continued by a later run
+        required: true
+        type: string
+        default: "150"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: accounting-collect-${{ inputs.plan_id }}
+  cancel-in-progress: false
+
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+      parallel: ${{ steps.list.outputs.parallel }}
+    steps:
+      - id: list
+        env:
+          FIRST: ${{ inputs.shard_first }}
+          LAST: ${{ inputs.shard_last }}
+          PARALLEL: ${{ inputs.max_parallel }}
+        run: |
+          set -euo pipefail
+          for value in "$FIRST" "$LAST" "$PARALLEL"; do
+            [[ "$value" =~ ^[0-9]{1,4}$ ]] || { echo "not a number"; exit 2; }
+          done
+          (( LAST >= FIRST && LAST - FIRST < 256 )) || { echo "bad shard range"; exit 2; }
+          (( PARALLEL >= 1 && PARALLEL <= 20 )) || { echo "bad max_parallel"; exit 2; }
+          echo "list=[$(seq -s, "$FIRST" "$LAST")]" >> "$GITHUB_OUTPUT"
+          echo "parallel=$PARALLEL" >> "$GITHUB_OUTPUT"
+
+  collect:
+    needs: shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.shards.outputs.parallel) }}
+      matrix:
+        shard: ${{ fromJSON(needs.shards.outputs.list) }}
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Fetch and install the collector
+        env:
+          ACCT_R2_ENDPOINT: ${{ secrets.ACCT_R2_ENDPOINT }}
+          ACCT_R2_ACCESS_KEY_ID: ${{ secrets.ACCT_COLLECT_R2_ACCESS_KEY_ID || secrets.ACCT_R2_ACCESS_KEY_ID }}
+          ACCT_R2_SECRET_ACCESS_KEY: ${{ secrets.ACCT_COLLECT_R2_SECRET_ACCESS_KEY || secrets.ACCT_R2_SECRET_ACCESS_KEY }}
+          ACCT_RAW_BUCKET: ${{ vars.ACCT_RAW_BUCKET }}
+          COLLECTOR: ${{ inputs.collector }}
+          WHEEL_NAME: ${{ inputs.wheel_name }}
+          WHEEL_SHA256: ${{ inputs.wheel_sha256 }}
+          REQUIREMENTS_SHA256: ${{ inputs.requirements_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$COLLECTOR" =~ ^[0-9a-f]{64}$ ]] || { echo "bad collector"; exit 2; }
+          [[ "$WHEEL_SHA256" =~ ^[0-9a-f]{64}$ && "$REQUIREMENTS_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "bad hash"; exit 2; }
+          [[ "$WHEEL_NAME" =~ ^accounting_data-[0-9A-Za-z._]+-py3-none-any\.whl$ ]] || { echo "bad wheel name"; exit 2; }
+          [[ "$ACCT_RAW_BUCKET" =~ ^[a-z0-9-]{3,63}$ ]] || { echo "bad bucket"; exit 2; }
+          work="$RUNNER_TEMP/collector"
+          mkdir -p "$work"
+          fetch() {
+            # The credentials go to curl through its configuration on standard input,
+            # not through the command line.
+            printf 'user = "%s:%s"\n' "$ACCT_R2_ACCESS_KEY_ID" "$ACCT_R2_SECRET_ACCESS_KEY" |
+              curl --config - --fail --silent --show-error --retry 3 --aws-sigv4 "aws:amz:auto:s3" \
+                --output "$work/$1" "${ACCT_R2_ENDPOINT%/}/$ACCT_RAW_BUCKET/control/collector/$COLLECTOR/$1"
+          }
+          fetch requirements.txt
+          fetch "$WHEEL_NAME"
+          printf '%s  %s\n%s  %s\n' "$REQUIREMENTS_SHA256" "$work/requirements.txt" "$WHEEL_SHA256" "$work/$WHEEL_NAME" |
+            sha256sum --check --quiet
+          python -m pip install --quiet --require-hashes --only-binary :all: -r "$work/requirements.txt"
+          python -m pip install --quiet --no-deps "$work/$WHEEL_NAME"
+
+      - name: Run the shard
+        env:
+          ACCT_R2_ENDPOINT: ${{ secrets.ACCT_R2_ENDPOINT }}
+          ACCT_R2_ACCESS_KEY_ID: ${{ secrets.ACCT_COLLECT_R2_ACCESS_KEY_ID || secrets.ACCT_R2_ACCESS_KEY_ID }}
+          ACCT_R2_SECRET_ACCESS_KEY: ${{ secrets.ACCT_COLLECT_R2_SECRET_ACCESS_KEY || secrets.ACCT_R2_SECRET_ACCESS_KEY }}
+          ACCT_RAW_BUCKET: ${{ vars.ACCT_RAW_BUCKET }}
+          ACCT_BROKER_URL: ${{ secrets.ACCT_BROKER_URL }}
+          ACCT_BROKER_TOKEN: ${{ secrets.ACCT_BROKER_TOKEN }}
+          ACCT_OPENDART_API_KEY_1: ${{ secrets.ACCT_OPENDART_API_KEY_1 }}
+          ACCT_OPENDART_API_KEY_2: ${{ secrets.ACCT_OPENDART_API_KEY_2 }}
+          ACCT_OPENDART_API_KEY_3: ${{ secrets.ACCT_OPENDART_API_KEY_3 }}
+          ACCT_OPENDART_API_KEY_4: ${{ secrets.ACCT_OPENDART_API_KEY_4 }}
+          ACCT_OPENDART_API_KEY_5: ${{ secrets.ACCT_OPENDART_API_KEY_5 }}
+          ACCT_OPENDART_API_KEY_6: ${{ secrets.ACCT_OPENDART_API_KEY_6 }}
+          PLAN_ID: ${{ inputs.plan_id }}
+          PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          SHARD: ${{ matrix.shard }}
+          TIME_LIMIT_MINUTES: ${{ inputs.time_limit_minutes }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_ID" =~ ^[a-z_]+-[0-9a-f]{12}$ && "$PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "bad plan"; exit 2; }
+          [[ "$TIME_LIMIT_MINUTES" =~ ^[0-9]{1,3}$ ]] || { echo "bad time limit"; exit 2; }
+          accounting-data collect run --plan "$PLAN_ID" --plan-sha256 "$PLAN_SHA256" \
+            --shard "$SHARD" --time-limit-minutes "$TIME_LIMIT_MINUTES"
